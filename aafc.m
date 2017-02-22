@@ -7,8 +7,9 @@ classdef aafc < handle
         SamplingTime = 1/(348*120)
         NyquistFreq = 348*60
     end
-    properties (Access = private)
-        SwitchPoint = 3e4
+    properties %(Access = private)
+        SwitchOffExc = 3e4
+        PlotGap = 200
         % transfer functions
         ClosedLoopTF_VCM
         ClosedLoopTF_MA
@@ -31,6 +32,7 @@ classdef aafc < handle
         ControlSignal_VCM
         ControlSignal_MA
         PESSignal
+        UnControlledPESSignal
         % switch
         RROSwitch = 0
         NRROSwitch = 1
@@ -54,10 +56,12 @@ classdef aafc < handle
         ThetaB_VCM
         ThetaM_VCM
         ThetaD_VCM
+        ThetaDF_VCM
         ThetaA_MA
         ThetaB_MA
         ThetaM_MA
         ThetaD_MA
+        ThetaDF_MA
         % regressor vector
         PhiPES_VCM 
         PhiExcit_VCM
@@ -74,17 +78,21 @@ classdef aafc < handle
         % parameters of RLS and Gradiant Descent
         FAB_VCM
         FM_VCM
+        FD_VCM
         LambdaAB_VCM
         LambdaM_VCM
+        LambdaD_VCM
         FAB_MA
         FM_MA
+        FD_MA
         LambdaAB_MA
         LambdaM_MA
-        LearnRate_VCM = 1e-5
-        LearnRate_MA = 1e-5
-        DecayRate_VCM = 1
-        DecayRate_MA = 1
-        StopStep = 2000
+        LambdaD_MA
+        LearnRate_VCM = 1e-2
+        LearnRate_MA = 1e-2
+        DecayRate_VCM = 0.95
+        DecayRate_MA = 0.95
+        StopStep = 1000
         % display
         TM_VCM
         TM_MA
@@ -92,15 +100,16 @@ classdef aafc < handle
         TD_MA
         Bode_opt
     end
-    properties (Access = private)
+    properties %(Access = private)
         TFSet
         TFSetOption
         k = 1
-        ua_vcm
-        ua_ma
-        u_vcm
-        u_ma
+        ua_vcm = 0
+        ua_ma = 0
+        u_vcm = 0
+        u_ma = 0
         pes
+        uncontrolledpes
         pesf_vcm
         pesf_ma
         excf_vcm
@@ -151,6 +160,7 @@ classdef aafc < handle
             AAFC.ExcitationSignal_VCM = varargin{5}(1:step);
             AAFC.ExcitationSignal_MA = varargin{6}(1:step);
             AAFC.PESSignal = zeros(1,AAFC.SimulationStep);
+            AAFC.UnControlledPESSignal = zeros(1,AAFC.SimulationStep);
         end
         function initializeSwitch(AAFC,varargin)
             % 8 inputs: RROSwitch
@@ -209,11 +219,13 @@ classdef aafc < handle
             AAFC.ThetaA_VCM = rand(AAFC.OrderA_VCM,AAFC.FilterBankNum_VCM);
             AAFC.ThetaB_VCM = rand(AAFC.OrderB_VCM,AAFC.FilterBankNum_VCM);
             AAFC.ThetaM_VCM = rand(AAFC.OrderM_VCM,AAFC.FilterBankNum_VCM);
+            AAFC.ThetaDF_VCM = rand(AAFC.OrderD_VCM,AAFC.FilterBankNum_VCM);
             AAFC.ThetaD_VCM = rand(AAFC.OrderD_VCM,1);
             
             AAFC.ThetaA_MA = rand(AAFC.OrderA_MA,AAFC.FilterBankNum_MA);
             AAFC.ThetaB_MA = rand(AAFC.OrderB_MA,AAFC.FilterBankNum_MA);
             AAFC.ThetaM_MA = rand(AAFC.OrderM_MA,AAFC.FilterBankNum_MA);
+            AAFC.ThetaDF_MA = rand(AAFC.OrderD_MA,AAFC.FilterBankNum_MA);
             AAFC.ThetaD_MA = rand(AAFC.OrderD_MA,1);
             % initialize historical TM TD
             AAFC.TM_VCM = cell(1,AAFC.FilterBankNum_VCM);
@@ -224,45 +236,61 @@ classdef aafc < handle
             AAFC.TD_MA = zeros(AAFC.OrderD_MA,AAFC.SimulationStep);
         end
         function initializeRLS(AAFC,varargin)
-            % 8 inputs: FAB_VCM
+            % 12 inputs: FAB_VCM
             %           FM_VCM
+            %           FD_VCM
             %           LambdaAB_VCM
             %           LambdaM_VCM
+            %           LambdaD_VCM
             %           FAB_MA
             %           FM_MA
+            %           FD_MA
             %           LambdaAB_MA
             %           LambdaM_MA
+            %           LambdaD_MA
             if isempty(varargin) == 0
                 AAFC.FAB_VCM = cellfun(@(x) x*eye(AAFC.OrderA_VCM+AAFC.OrderB_VCM),varargin{1},'un',0);
                 AAFC.FM_VCM = cellfun(@(x) x*eye(AAFC.OrderM_VCM),varargin{2},'un',0);
-                AAFC.LambdaAB_VCM = varargin{3};
-                AAFC.LambdaM_VCM = varargin{4};
-                AAFC.FAB_MA = cellfun(@(x) x*eye(AAFC.OrderA_MA+AAFC.OrderB_MA),varargin{5},'un',0);
-                AAFC.FM_MA = cellfun(@(x) x*eye(AAFC.OrderM_MA),varargin{6},'un',0);
-                AAFC.LambdaAB_MA = varargin{7};
-                AAFC.LambdaM_MA = varargin{8};
+                AAFC.FD_VCM = cellfun(@(x) x*eye(AAFC.OrderD_VCM),varargin{3},'un',0);
+                AAFC.LambdaAB_VCM = varargin{4};
+                AAFC.LambdaM_VCM = varargin{5};
+                AAFC.LambdaD_VCM = varargin{6};
+                AAFC.FAB_MA = cellfun(@(x) x*eye(AAFC.OrderA_MA+AAFC.OrderB_MA),varargin{7},'un',0);
+                AAFC.FM_MA = cellfun(@(x) x*eye(AAFC.OrderM_MA),varargin{8},'un',0);
+                AAFC.FD_MA = cellfun(@(x) x*eye(AAFC.OrderD_MA),varargin{9},'un',0);
+                AAFC.LambdaAB_MA = varargin{10};
+                AAFC.LambdaM_MA = varargin{11};
+                AAFC.LambdaD_MA = varargin{12};
             else
                 AAFC.FAB_VCM = cell(1,AAFC.FilterBankNum_VCM);
                 AAFC.FAB_VCM(:) = {1e8*eye(AAFC.OrderA_VCM+AAFC.OrderB_VCM)};
                 AAFC.FM_VCM = cell(1,AAFC.FilterBankNum_VCM);
                 AAFC.FM_VCM(:) = {1e6*eye(AAFC.OrderM_VCM)};
+                AAFC.FD_VCM = cell(1,AAFC.FilterBankNum_VCM);
+                AAFC.FD_VCM(:) = {1e4*eye(AAFC.OrderD_VCM)};
                 AAFC.LambdaAB_VCM = cell(1,AAFC.FilterBankNum_VCM);
                 AAFC.LambdaAB_VCM(:) = {1-1e-5};
                 AAFC.LambdaM_VCM = cell(1,AAFC.FilterBankNum_VCM);
                 AAFC.LambdaM_VCM(:) = {1-1e-4};
+                AAFC.LambdaD_VCM = cell(1,AAFC.FilterBankNum_VCM);
+                AAFC.LambdaD_VCM(:) = {1-1e-4};
                 
                 AAFC.FAB_MA = cell(1,AAFC.FilterBankNum_MA);
                 AAFC.FAB_MA(:) = {1e8*eye(AAFC.OrderA_MA+AAFC.OrderB_MA)};
                 AAFC.FM_MA = cell(1,AAFC.FilterBankNum_MA);
                 AAFC.FM_MA(:) = {1e6*eye(AAFC.OrderM_MA)};
+                AAFC.FD_MA = cell(1,AAFC.FilterBankNum_MA);
+                AAFC.FD_MA(:) = {1e4*eye(AAFC.OrderD_MA)};
                 AAFC.LambdaAB_MA = cell(1,AAFC.FilterBankNum_MA);
                 AAFC.LambdaAB_MA(:) = {1-1e-5};
                 AAFC.LambdaM_MA = cell(1,AAFC.FilterBankNum_MA);
                 AAFC.LambdaM_MA(:) = {1-1e-4};
+                AAFC.LambdaD_MA = cell(1,AAFC.FilterBankNum_MA);
+                AAFC.LambdaD_MA(:) = {1-1e-4};
             end
             
         end
-        function initializeGD(AAFC,varargin)
+        function initializeSGD(AAFC,varargin)
             % 5 inputs: LearnRate_VCM
             %           LearnRate_MA 
             %           DecayRate_VCM
@@ -313,7 +341,7 @@ classdef aafc < handle
             AAFC.initializeSwitch();
             AAFC.initializeRegressor();
             AAFC.initializeRLS();
-            AAFC.initializeGD();
+            AAFC.initializeSGD();
             AAFC.initializeTFSet();
             AAFC.initializeSimulation();
         end
@@ -333,15 +361,17 @@ classdef aafc < handle
             AAFC.u_vcm = AAFC.ua_vcm*AAFC.ControlSwitch_VCM+...
                          AAFC.ExcitationSignal_VCM(AAFC.k)*AAFC.ExcitationSwitch_VCM;
             AAFC.u_ma = AAFC.ua_ma*AAFC.ControlSwitch_MA+...
-                         AAFC.ExcitationSignal_MA(AAFC.k)*AAFC.ExcitationSwitch_MA;
+                        AAFC.ExcitationSignal_MA(AAFC.k)*AAFC.ExcitationSwitch_MA;
         end
         function generateRealPES(AAFC)
             % generate real PES signal at step k
             [p1,AAFC.TFSet] = updatestateLTI(AAFC.TFSet,'VCM',AAFC.u_vcm,AAFC.TFSetOption);
             [p2,AAFC.TFSet] = updatestateLTI(AAFC.TFSet,'MA',AAFC.u_ma,AAFC.TFSetOption);
-            AAFC.pes = p1 + p2 + AAFC.DisturbanceSignal(AAFC.k)*AAFC.DisturbanceSwitch...
-                               + AAFC.RROSignal(AAFC.k)*AAFC.RROSwitch...
-                               + AAFC.NRROSignal(AAFC.k)*AAFC.NRROSwitch;
+            p0 = AAFC.DisturbanceSignal(AAFC.k)*AAFC.DisturbanceSwitch+...
+                 AAFC.RROSignal(AAFC.k)*AAFC.RROSwitch+...
+                 AAFC.NRROSignal(AAFC.k)*AAFC.NRROSwitch;
+            AAFC.pes = p0 + p1 + p2; 
+            AAFC.uncontrolledpes = p0;
         end
         function filterPES(AAFC)
             for i = 1:AAFC.FilterBankNum_VCM
@@ -385,16 +415,23 @@ classdef aafc < handle
             AAFC.err_vcm = AAFC.pesf_vcm-AAFC.pesh_vcm;
             AAFC.err_ma = AAFC.pesf_ma-AAFC.pesh_ma;
         end
+        function updatePES(AAFC)
+            AAFC.generateRealPES;
+            AAFC.filterPES;
+            AAFC.filterExcAcc;
+            AAFC.estimatePES;
+            AAFC.esterrorPES;
+        end
         function updateIdentification(AAFC,s)
             if s == 0 % stop updating A and B
                 % update System parameters for VCM
                 for i = 1:AAFC.FilterBankNum_VCM
-                    [AAFC.ThetaM_VCM(:,i),AAFC.FM_VCM{i}] = rls(AAFC.ThetaM_VCM(:,i),AAFC.PhiAccelDelay_VCM(:,1),...
+                    [AAFC.ThetaM_VCM(:,i),AAFC.FM_VCM{i}] = rls(AAFC.ThetaM_VCM(:,i),AAFC.PhiAccelDelay_VCM(:,i),...
                                                                 AAFC.FM_VCM{i},AAFC.err_vcm(i),AAFC.LambdaM_VCM{i});
                 end
                 % update System parameters for MA
                 for i = 1:AAFC.FilterBankNum_MA
-                    [AAFC.ThetaM_MA(:,i),AAFC.FM_MA{i}] = rls(AAFC.ThetaM_MA(:,i),AAFC.PhiAccelDelay_MA(:,1),...
+                    [AAFC.ThetaM_MA(:,i),AAFC.FM_MA{i}] = rls(AAFC.ThetaM_MA(:,i),AAFC.PhiAccelDelay_MA(:,i),...
                                                                 AAFC.FM_MA{i},AAFC.err_ma(i),AAFC.LambdaM_MA{i});
                 end  
             else 
@@ -420,7 +457,8 @@ classdef aafc < handle
                 end
             end
         end
-        function updateController(AAFC)
+        function updateControllerLMS(AAFC)
+            % apply least mean square (LMS) adaptive filters
             % update learning rate
             AAFC.count = AAFC.count+1;
             if AAFC.count > AAFC.StopStep
@@ -428,16 +466,15 @@ classdef aafc < handle
                 AAFC.LearnRate_VCM = AAFC.LearnRate_VCM*AAFC.DecayRate_VCM;
                 AAFC.LearnRate_MA = AAFC.LearnRate_MA*AAFC.DecayRate_MA;
             end
-            % update control parameters for VCM
+            % update controller parameters for VCM
             x1 = sum(AAFC.PhiAccelBfilter_VCM*diag(AAFC.pesa_vcm),2);
-            AAFC.ThetaD_VCM = AAFC.ThetaD_VCM - AAFC.LearnRate_VCM*x1/...%(AAFC.PhiAccelBfilter_VCM(:,1)'*AAFC.PhiAccelBfilter_VCM(:,1));%...
-                                               (AAFC.PhiAccel_VCM'*AAFC.PhiAccel_VCM);  
-            % updata control parameters for MA
+            AAFC.ThetaD_VCM = AAFC.ThetaD_VCM - AAFC.LearnRate_VCM*x1;  
+            % updata controller parameters for MA
             x2 = sum(AAFC.PhiAccelBfilter_MA*diag(AAFC.pesa_ma),2);
-            AAFC.ThetaD_MA = AAFC.ThetaD_MA - AAFC.LearnRate_MA*x2/...%(AAFC.PhiAccelBfilter_MA(:,1)'*AAFC.PhiAccelBfilter_MA(:,1));%...
-                                             (AAFC.PhiAccel_MA'*AAFC.PhiAccel_MA); 
+            AAFC.ThetaD_MA = AAFC.ThetaD_MA - AAFC.LearnRate_MA*x2; 
         end
-        function updateControllerNormGD(AAFC)
+        function updateControllerNLMS(AAFC)
+            % apply normalized least mean square (NLMS) adaptive filters
             % update learning rate
             AAFC.count = AAFC.count+1;
             if AAFC.count > AAFC.StopStep
@@ -445,12 +482,27 @@ classdef aafc < handle
                 AAFC.LearnRate_VCM = AAFC.LearnRate_VCM*AAFC.DecayRate_VCM;
                 AAFC.LearnRate_MA = AAFC.LearnRate_MA*AAFC.DecayRate_MA;
             end
-            % update control parameters for VCM
+            % update controller parameters for VCM
             x1 = sum(AAFC.PhiAccelBfilter_VCM*diag(AAFC.pesa_vcm),2);
             AAFC.ThetaD_VCM = AAFC.ThetaD_VCM - AAFC.LearnRate_VCM*x1/sum(diag(AAFC.PhiAccelBfilter_VCM'*AAFC.PhiAccelBfilter_VCM));  
-            % updata control parameters for MA
+            % updata controller parameters for MA
             x2 = sum(AAFC.PhiAccelBfilter_MA*diag(AAFC.pesa_ma),2);
             AAFC.ThetaD_MA = AAFC.ThetaD_MA - AAFC.LearnRate_MA*x2/sum(diag(AAFC.PhiAccelBfilter_MA'*AAFC.PhiAccelBfilter_MA));
+        end
+        function updateControllerRLS(AAFC)
+            % apply recursive least square (RLS) adaptive filters
+            % update controller parameters for VCM
+            for i = 1:AAFC.FilterBankNum_VCM
+                [AAFC.ThetaDF_VCM(:,i),AAFC.FD_VCM{i}] = rls(AAFC.ThetaDF_VCM(:,i),AAFC.PhiAccelBfilter_VCM(:,i),...
+                                                             AAFC.FD_VCM{i},AAFC.pesa_vcm(i),AAFC.LambdaD_VCM{i});
+            end
+            AAFC.ThetaD_VCM = sum(-AAFC.ThetaDF_VCM,2);
+            % update controller parameters for MA
+            for i = 1:AAFC.FilterBankNum_MA
+                [AAFC.ThetaDF_MA(:,i),AAFC.FD_MA{i}] = rls(AAFC.ThetaDF_MA(:,i),AAFC.PhiAccelBfilter_MA(:,i),...
+                                                           AAFC.FD_MA{i},AAFC.pesa_ma(i),AAFC.LambdaD_MA{i});
+            end
+            AAFC.ThetaD_MA = sum(-AAFC.ThetaDF_MA,2);
         end
         function updateRegressor(AAFC)
             % update VCM regressor
@@ -471,8 +523,11 @@ classdef aafc < handle
                 x = AAFC.ThetaB_MA(:,i)'*AAFC.PhiAccelBorder_MA(:,i);
                 AAFC.PhiAccelBfilter_MA(:,i) = [x;AAFC.PhiAccelBfilter_MA(1:end-1,i)];
             end
+        end
+        function storeSignal(AAFC)
             % store PES signal
-            AAFC.PESSignal(AAFC.k) = AAFC.pes; 
+            AAFC.PESSignal(AAFC.k) = AAFC.pes;
+            AAFC.UnControlledPESSignal(AAFC.k) = AAFC.uncontrolledpes;
             % store historical TM TD
             for i = 1:AAFC.FilterBankNum_VCM
                 AAFC.TM_VCM{i}(:,AAFC.k) = AAFC.ThetaM_VCM(:,i);
@@ -483,73 +538,92 @@ classdef aafc < handle
             end
             AAFC.TD_MA(:,AAFC.k) = AAFC.ThetaD_MA;
         end
-        function adaptiveControl(AAFC)
+        function adaptiveControlLMS(AAFC)
             AAFC.k = 1; 
             n = 1;
-            AAFC.count = 1;
+            AAFC.count = 0;
             while AAFC.k <= AAFC.SimulationStep
-                if AAFC.k <= AAFC.SwitchPoint
+                if AAFC.k <= AAFC.SwitchOffExc
                     AAFC.generateControlSignal(1,1,0,0); % only excitation
-                    AAFC.generateRealPES();
-                    AAFC.filterPES();
-                    AAFC.filterExcAcc();
-                    AAFC.estimatePES();
-                    AAFC.esterrorPES();
-                    AAFC.updateIdentification(1); % updating A and B
-%                     AAFC.updateController(); % stop updating D
+                    AAFC.updatePES;
+                    AAFC.updateIdentification(1); % update A and B
                     AAFC.updateRegressor;
+                    AAFC.storeSignal;
                 else
                     AAFC.generateControlSignal(0,0,1,1); % only compensation
-                    AAFC.generateRealPES();
-                    AAFC.filterPES();
-                    AAFC.filterExcAcc();
-                    AAFC.estimatePES();
-                    AAFC.esterrorPES();
+                    AAFC.updatePES;
                     AAFC.updateIdentification(0); % stop updating A and B
-                    AAFC.updateController(); % updating D
+                    AAFC.updateControllerLMS; % update D
                     AAFC.updateRegressor;
+                    AAFC.storeSignal;
                 end
-                AAFC.k = AAFC.k+1;
-                n = n+1;
                 if n >= 5000, disp(int2str(AAFC.k)); n = 0; end
+                n = n+1;
+                AAFC.k = AAFC.k+1;
             end
         end
-        function adaptiveControlNormGD(AAFC)
+        function adaptiveControlNLMS(AAFC)
             AAFC.k = 1; 
             n = 1;
-            AAFC.count = 1;
+            AAFC.count = 0;
             while AAFC.k <= AAFC.SimulationStep
-                if AAFC.k <= AAFC.SwitchPoint
+                if AAFC.k <= AAFC.SwitchOffExc
                     AAFC.generateControlSignal(1,1,0,0); % only excitation
-                    AAFC.generateRealPES();
-                    AAFC.filterPES();
-                    AAFC.filterExcAcc();
-                    AAFC.estimatePES();
-                    AAFC.esterrorPES();
-                    AAFC.updateIdentification(1); % updating A and B
-%                     AAFC.updateControllerNormGD(); % stop updating D
+                    AAFC.updatePES;
+                    AAFC.updateIdentification(1); % update A and B
                     AAFC.updateRegressor;
+                    AAFC.storeSignal;
                 else
                     AAFC.generateControlSignal(0,0,1,1); % only compensation
-                    AAFC.generateRealPES();
-                    AAFC.filterPES();
-                    AAFC.filterExcAcc();
-                    AAFC.estimatePES();
-                    AAFC.esterrorPES();
+                    AAFC.updatePES;
                     AAFC.updateIdentification(0); % stop updating A and B
-                    AAFC.updateControllerNormGD(); % updating D
+                    AAFC.updateControllerNLMS; % update D
                     AAFC.updateRegressor;
+                    AAFC.storeSignal;
                 end
-                AAFC.k = AAFC.k+1;
+                if n >= 5000, disp(int2str(AAFC.k)); n = 0; end               
                 n = n+1;
+                AAFC.k = AAFC.k+1;
+            end
+        end
+        function adaptiveControlRLS(AAFC)
+            AAFC.k = 1; 
+            n = 1;
+            AAFC.count = 0;
+            while AAFC.k <= AAFC.SimulationStep
+                if AAFC.k <= AAFC.SwitchOffExc
+                    AAFC.generateControlSignal(1,1,0,0); % only excitation
+                    AAFC.updatePES;
+                    AAFC.updateIdentification(1); % update A and B
+                    AAFC.updateRegressor;
+                    AAFC.storeSignal;
+                else
+                    AAFC.generateControlSignal(0,0,1,1); % only compensation
+                    AAFC.updatePES;
+                    AAFC.updateIdentification(0); % stop updating A and B
+                    AAFC.updateControllerRLS; % update D
+                    AAFC.updateRegressor;
+                    AAFC.storeSignal;
+                end
                 if n >= 5000, disp(int2str(AAFC.k)); n = 0; end
+                n = n+1;
+                AAFC.k = AAFC.k+1;
             end
         end
         % display functions
         function plotPES(AAFC)
-            figure; plot(AAFC.PESSignal(AAFC.SwitchPoint:end));
-            figure; fftp(AAFC.PESSignal(AAFC.SwitchPoint:AAFC.SwitchPoint+1e4),AAFC.SamplingFreq); hold on;
+            figure; plot(AAFC.UnControlledPESSignal); hold on;
+                    plot(AAFC.PESSignal);
+            figure; fftp(AAFC.UnControlledPESSignal(end-1e4:end),AAFC.SamplingFreq); hold on;
                     fftp(AAFC.PESSignal(end-1e4:end),AAFC.SamplingFreq);
+        end
+        function plotAcc(AAFC)
+            figure; plot(AAFC.AccelerationSignal);
+            figure; fftp(AAFC.AccelerationSignal(end-1e4:end),AAFC.SamplingFreq);
+        end
+        function plotDist(AAFC)
+            figure; plot(AAFC.DisturbanceSignal);
+            figure; fftp(AAFC.DisturbanceSignal(end-1e4:end),AAFC.SamplingFreq);
         end
         function plotVCM(AAFC,Bode_Opt)
             for i = 1:AAFC.FilterBankNum_VCM
@@ -564,24 +638,24 @@ classdef aafc < handle
             end
         end
         function plotTM_VCM(AAFC)
-            K = repmat(1:500:AAFC.SimulationStep,AAFC.OrderM_VCM,1);
+            K = repmat(1:AAFC.PlotGap:AAFC.SimulationStep,AAFC.OrderM_VCM,1);
             for i = 1:AAFC.FilterBankNum_VCM
-                figure; plot(K,AAFC.TM_VCM{i}(:,1:500:end),'.b');
+                figure; plot(K,AAFC.TM_VCM{i}(:,1:AAFC.PlotGap:end),'.b'); grid on;
             end
         end
         function plotTM_MA(AAFC)
-            K = repmat(1:500:AAFC.SimulationStep,AAFC.OrderM_MA,1);
+            K = repmat(1:AAFC.PlotGap:AAFC.SimulationStep,AAFC.OrderM_MA,1);
             for i = 1:AAFC.FilterBankNum_MA
-                figure; plot(K,AAFC.TM_MA{i}(:,1:500:end),'.b');
+                figure; plot(K,AAFC.TM_MA{i}(:,1:AAFC.PlotGap:end),'.b'); grid on;
             end
         end
         function plotTD_VCM(AAFC)
-            K = repmat(1:500:AAFC.SimulationStep,AAFC.OrderD_VCM,1);
-            figure; plot(K,AAFC.TD_VCM(:,1:500:end),'.b');
+            K = repmat(1:AAFC.PlotGap:AAFC.SimulationStep,AAFC.OrderD_VCM,1);
+            figure; plot(K,AAFC.TD_VCM(:,1:AAFC.PlotGap:end),'.b'); grid on;
         end
         function plotTD_MA(AAFC)
-            K = repmat(1:500:AAFC.SimulationStep,AAFC.OrderD_MA,1);
-            figure; plot(K,AAFC.TD_MA(:,1:500:end),'.b');
+            K = repmat(1:AAFC.PlotGap:AAFC.SimulationStep,AAFC.OrderD_MA,1);
+            figure; plot(K,AAFC.TD_MA(:,1:AAFC.PlotGap:end),'.b'); grid on;
         end
     end
     
