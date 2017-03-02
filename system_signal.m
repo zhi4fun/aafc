@@ -24,7 +24,7 @@ tf1.Ts = Ts;
 vib1 = lsim(tf1,v1);
 vib1 = vib1/std(vib1)*0.5;
 % middle frequency
-f = [10e3];
+f = [7e3];
 for i = 1:1:length(f)
     Fpeak = f(i);  
     Q = 20;       
@@ -37,10 +37,10 @@ tf2.Ts = Ts;
 vib2 = lsim(tf2,v1);
 vib2 = vib2/std(vib2)*0.5;
 % high frequency
-f = [15e3];
+f = [12e3,17.5e3];
 for i = 1:1:length(f)
     Fpeak = f(i);  
-    Q = 20;      
+    Q = 100;      
     BW =  Fpeak/Q;
     Apass = 5;     
     [b, a] = iirpeak(Fpeak/(Fs/2), BW/(Fs/2), Apass);
@@ -50,7 +50,9 @@ tf3.Ts = Ts;
 vib3 = lsim(tf3,v1);
 vib3 = vib3/std(vib3)*0.5;
 
-vib = vib1+3*vib2+3*vib3;
+vib = vib1+2*vib2;%+10*vib3;
+% vib = vib3;
+vib = vib/3;
 % vib = vib1+3*vib3;
 Dist = lsim(TF_vib2pes,vib)';
 Acc = lsim(TF_vib2acc,vib)';
@@ -77,8 +79,8 @@ F7 = {H7(:,1)',H7(:,2)',H7(:,3)',H7(:,4)',H7(:,5)',H7(:,6)',H7(:,7)'};
 % FB_VCM = {F(:,1)',F(:,3)'};
 % FB_MA = {F(:,5)',F(:,7)'};
 %% filtered excitation
-Exc_VCM = filter(H5(:,1),1,ue)';
-Exc_MA = filter(H5(:,3),1,ue)'+filter(H5(:,5),1,ue)';
+Exc_VCM = filter(H7(:,1),1,ue)';
+Exc_MA = filter(H7(:,3),1,ue)';%+filter(H7(:,5),1,ue)'+5*filter(H7(:,7),1,ue)';
 % Exc_VCM = filter(H3(:,1),1,ue)';
 % Exc_MA = filter(H3(:,3),1,ue)';
 figure;fftp(Exc_VCM,Fs);

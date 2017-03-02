@@ -6,9 +6,14 @@ classdef aafc < handle
         SamplingFreq = 348*120
         SamplingTime = 1/(348*120)
         NyquistFreq = 348*60
+        % optimal controller
+        ThetaD_Optimal_VCM
+        ThetaD_Optimal_MA
+        ThetaD_VCM
+        ThetaD_MA
     end
-    properties %(Access = private)
-        SwitchOffExc = 3e4
+    properties (Access = private)
+        SwitchOffExc = 1e4
         PlotGap = 200
         % transfer functions
         ClosedLoopTF_VCM
@@ -24,7 +29,11 @@ classdef aafc < handle
         FilterBankNum_MA
         % signals
         AccelerationSignal
+        ASignal_LowFreq
+        ASignal_HighFreq
         DisturbanceSignal
+        DSignal_LowFreq
+        DSignal_HighFreq
         RROSignal
         NRROSignal
         ExcitationSignal_VCM
@@ -32,6 +41,7 @@ classdef aafc < handle
         ControlSignal_VCM
         ControlSignal_MA
         PESSignal
+        OptimalControlledPESSignal
         UnControlledPESSignal
         % switch
         RROSwitch = 0
@@ -55,12 +65,10 @@ classdef aafc < handle
         ThetaA_VCM
         ThetaB_VCM
         ThetaM_VCM
-        ThetaD_VCM
         ThetaDF_VCM
         ThetaA_MA
         ThetaB_MA
         ThetaM_MA
-        ThetaD_MA
         ThetaDF_MA
         % regressor vector
         PhiPES_VCM 
@@ -100,7 +108,7 @@ classdef aafc < handle
         TD_MA
         Bode_opt
     end
-    properties %(Access = private)
+    properties (Access = private)
         TFSet
         TFSetOption
         k = 1
@@ -122,11 +130,10 @@ classdef aafc < handle
         err_ma
         pesa_vcm
         pesa_ma
-        count = 1
+        count = 0
     end
     
-    methods
-        % initialization functions
+    methods % initialization functions
         function AAFC = aafc(SimulationStep)
             if isempty(SimulationStep) == 0
                 AAFC.SimulationStep = SimulationStep;
@@ -160,6 +167,7 @@ classdef aafc < handle
             AAFC.ExcitationSignal_VCM = varargin{5}(1:step);
             AAFC.ExcitationSignal_MA = varargin{6}(1:step);
             AAFC.PESSignal = zeros(1,AAFC.SimulationStep);
+            AAFC.OptimalControlledPESSignal = zeros(1,AAFC.SimulationStep);
             AAFC.UnControlledPESSignal = zeros(1,AAFC.SimulationStep);
         end
         function initializeSwitch(AAFC,varargin)
@@ -182,25 +190,7 @@ classdef aafc < handle
                 AAFC.FilterBankSwitch = varargin{8};
             end
         end
-        function initializeRegressor(AAFC,varargin)
-            % 8 inputs: OrderA_VCM
-            %           OrderB_VCM
-            %           OrderM_VCM
-            %           OrderD_VCM
-            %           OrderA_MA
-            %           OrderB_MA
-            %           OrderM_MA
-            %           OrderD_MA
-            if isempty(varargin) == 0
-                AAFC.OrderA_VCM = varargin{1};
-                AAFC.OrderB_VCM = varargin{2};
-                AAFC.OrderM_VCM = varargin{3};
-                AAFC.OrderD_VCM = varargin{4};
-                AAFC.OrderA_MA = varargin{5};
-                AAFC.OrderB_MA = varargin{6};
-                AAFC.OrderM_MA = varargin{7};
-                AAFC.OrderD_MA = varargin{8};
-            end
+        function initializeRegressor(AAFC)
             % initialize regressor vector(zero vector)
             AAFC.PhiPES_VCM = zeros(AAFC.OrderA_VCM,AAFC.FilterBankNum_VCM); 
             AAFC.PhiExcit_VCM = zeros(AAFC.OrderB_VCM,AAFC.FilterBankNum_VCM);
@@ -235,6 +225,27 @@ classdef aafc < handle
             AAFC.TM_MA(:) = {zeros(AAFC.OrderM_MA,AAFC.SimulationStep)};
             AAFC.TD_MA = zeros(AAFC.OrderD_MA,AAFC.SimulationStep);
         end
+        function initializeOrder(AAFC,varargin)
+            % 8 inputs: OrderA_VCM
+            %           OrderB_VCM
+            %           OrderM_VCM
+            %           OrderD_VCM
+            %           OrderA_MA
+            %           OrderB_MA
+            %           OrderM_MA
+            %           OrderD_MA
+            if isempty(varargin) == 0
+                AAFC.OrderA_VCM = varargin{1};
+                AAFC.OrderB_VCM = varargin{2};
+                AAFC.OrderM_VCM = varargin{3};
+                AAFC.OrderD_VCM = varargin{4};
+                AAFC.OrderA_MA = varargin{5};
+                AAFC.OrderB_MA = varargin{6};
+                AAFC.OrderM_MA = varargin{7};
+                AAFC.OrderD_MA = varargin{8};
+            end
+            AAFC.initializeRegressor;
+        end   
         function initializeRLS(AAFC,varargin)
             % 12 inputs: FAB_VCM
             %           FM_VCM
@@ -309,20 +320,26 @@ classdef aafc < handle
             AAFC.TFSet = struct();
             AAFC.TFSetOption.storeState = 0;
             AAFC.TFSetOption.storeOutput = 0;
-            AAFC.TFSet = addstateLTI(AAFC.TFSet,AAFC.ClosedLoopTF_VCM,[],'iir','VCM');
-            AAFC.TFSet = addstateLTI(AAFC.TFSet,AAFC.ClosedLoopTF_MA,[],'iir','MA');
+            AAFC.TFSet = AAFC.addstateLTI(AAFC.TFSet,AAFC.ClosedLoopTF_VCM,[],'iir','VCM');
+            AAFC.TFSet = AAFC.addstateLTI(AAFC.TFSet,AAFC.ClosedLoopTF_MA,[],'iir','MA');
             for i = 1:AAFC.FilterBankNum_VCM
-                AAFC.TFSet = addstateLTI(AAFC.TFSet,AAFC.FilterBankTF_VCM{i},[],'fir',['VCM_Filter' num2str(i) '_pes']);
-                AAFC.TFSet = addstateLTI(AAFC.TFSet,AAFC.FilterBankTF_VCM{i},[],'fir',['VCM_Filter' num2str(i) '_exc']);
-                AAFC.TFSet = addstateLTI(AAFC.TFSet,AAFC.FilterBankTF_VCM{i},[],'fir',['VCM_Filter' num2str(i) '_acc']);
+                AAFC.TFSet = AAFC.addstateLTI(AAFC.TFSet,AAFC.FilterBankTF_VCM{i},[],'fir',['VCM_Filter' num2str(i) '_pes']);
+                AAFC.TFSet = AAFC.addstateLTI(AAFC.TFSet,AAFC.FilterBankTF_VCM{i},[],'fir',['VCM_Filter' num2str(i) '_exc']);
+                AAFC.TFSet = AAFC.addstateLTI(AAFC.TFSet,AAFC.FilterBankTF_VCM{i},[],'fir',['VCM_Filter' num2str(i) '_acc']);
             end
             for i = 1:AAFC.FilterBankNum_MA
-                AAFC.TFSet = addstateLTI(AAFC.TFSet,AAFC.FilterBankTF_MA{i},[],'fir',['MA_Filter' num2str(i) '_pes']);
-                AAFC.TFSet = addstateLTI(AAFC.TFSet,AAFC.FilterBankTF_MA{i},[],'fir',['MA_Filter' num2str(i) '_exc']);
-                AAFC.TFSet = addstateLTI(AAFC.TFSet,AAFC.FilterBankTF_MA{i},[],'fir',['MA_Filter' num2str(i) '_acc']);
+                AAFC.TFSet = AAFC.addstateLTI(AAFC.TFSet,AAFC.FilterBankTF_MA{i},[],'fir',['MA_Filter' num2str(i) '_pes']);
+                AAFC.TFSet = AAFC.addstateLTI(AAFC.TFSet,AAFC.FilterBankTF_MA{i},[],'fir',['MA_Filter' num2str(i) '_exc']);
+                AAFC.TFSet = AAFC.addstateLTI(AAFC.TFSet,AAFC.FilterBankTF_MA{i},[],'fir',['MA_Filter' num2str(i) '_acc']);
             end
         end
         function initializeSimulation(AAFC)
+            AAFC.ua_vcm = 0; 
+            AAFC.ua_ma = 0;
+            AAFC.u_vcm = 0;
+            AAFC.u_ma = 0;
+            AAFC.pes = 0;
+            AAFC.uncontrolledpes = 0;
             AAFC.pesf_vcm = zeros(1,AAFC.FilterBankNum_VCM);
             AAFC.pesf_ma = zeros(1,AAFC.FilterBankNum_MA);
             AAFC.excf_vcm = zeros(1,AAFC.FilterBankNum_VCM);
@@ -339,13 +356,14 @@ classdef aafc < handle
             AAFC.initializeSystem(CLTF_VCM,CLTF_MA,FBTF_VCM,FBTF_MA);
             AAFC.initializeSignal(Acc,Dist,RRO,NRRO,Ex_VCM,Ex_MA);
             AAFC.initializeSwitch();
-            AAFC.initializeRegressor();
+            AAFC.initializeOrder();
             AAFC.initializeRLS();
             AAFC.initializeSGD();
             AAFC.initializeTFSet();
             AAFC.initializeSimulation();
         end
-        % adaptive algorithm functions
+    end
+    methods % internal functions
         function generateControlSignal(AAFC,varargin)
             if isempty(varargin) == 0
                 AAFC.ExcitationSwitch_VCM = varargin{1};
@@ -365,8 +383,8 @@ classdef aafc < handle
         end
         function generateRealPES(AAFC)
             % generate real PES signal at step k
-            [p1,AAFC.TFSet] = updatestateLTI(AAFC.TFSet,'VCM',AAFC.u_vcm,AAFC.TFSetOption);
-            [p2,AAFC.TFSet] = updatestateLTI(AAFC.TFSet,'MA',AAFC.u_ma,AAFC.TFSetOption);
+            [p1,AAFC.TFSet] = AAFC.updatestateLTI(AAFC.TFSet,'VCM',AAFC.u_vcm,AAFC.TFSetOption);
+            [p2,AAFC.TFSet] = AAFC.updatestateLTI(AAFC.TFSet,'MA',AAFC.u_ma,AAFC.TFSetOption);
             p0 = AAFC.DisturbanceSignal(AAFC.k)*AAFC.DisturbanceSwitch+...
                  AAFC.RROSignal(AAFC.k)*AAFC.RROSwitch+...
                  AAFC.NRROSignal(AAFC.k)*AAFC.NRROSwitch;
@@ -375,25 +393,25 @@ classdef aafc < handle
         end
         function filterPES(AAFC)
             for i = 1:AAFC.FilterBankNum_VCM
-                [AAFC.pesf_vcm(i),AAFC.TFSet] = updatestateLTI(AAFC.TFSet,['VCM_Filter' num2str(i) '_pes'],...
+                [AAFC.pesf_vcm(i),AAFC.TFSet] = AAFC.updatestateLTI(AAFC.TFSet,['VCM_Filter' num2str(i) '_pes'],...
                                                                AAFC.pes,AAFC.TFSetOption);
             end
             for i = 1:AAFC.FilterBankNum_MA
-                [AAFC.pesf_ma(i),AAFC.TFSet] = updatestateLTI(AAFC.TFSet,['MA_Filter' num2str(i) '_pes'],...
+                [AAFC.pesf_ma(i),AAFC.TFSet] = AAFC.updatestateLTI(AAFC.TFSet,['MA_Filter' num2str(i) '_pes'],...
                                                               AAFC.pes,AAFC.TFSetOption);
             end
         end
         function filterExcAcc(AAFC)
             for i = 1:AAFC.FilterBankNum_VCM
-                [AAFC.excf_vcm(i),AAFC.TFSet] = updatestateLTI(AAFC.TFSet,['VCM_Filter' num2str(i) '_exc'],...
+                [AAFC.excf_vcm(i),AAFC.TFSet] = AAFC.updatestateLTI(AAFC.TFSet,['VCM_Filter' num2str(i) '_exc'],...
                                                                AAFC.ExcitationSignal_VCM(AAFC.k),AAFC.TFSetOption);
-                [AAFC.accf_vcm(i),AAFC.TFSet] = updatestateLTI(AAFC.TFSet,['VCM_Filter' num2str(i) '_acc'],...
+                [AAFC.accf_vcm(i),AAFC.TFSet] = AAFC.updatestateLTI(AAFC.TFSet,['VCM_Filter' num2str(i) '_acc'],...
                                                                AAFC.AccelerationSignal(AAFC.k),AAFC.TFSetOption);
             end
             for i = 1:AAFC.FilterBankNum_MA
-                [AAFC.excf_ma(i),AAFC.TFSet] = updatestateLTI(AAFC.TFSet,['MA_Filter' num2str(i) '_exc'],...
+                [AAFC.excf_ma(i),AAFC.TFSet] = AAFC.updatestateLTI(AAFC.TFSet,['MA_Filter' num2str(i) '_exc'],...
                                                               AAFC.ExcitationSignal_MA(AAFC.k),AAFC.TFSetOption);
-                [AAFC.accf_ma(i),AAFC.TFSet] = updatestateLTI(AAFC.TFSet,['MA_Filter' num2str(i) '_acc'],...
+                [AAFC.accf_ma(i),AAFC.TFSet] = AAFC.updatestateLTI(AAFC.TFSet,['MA_Filter' num2str(i) '_acc'],...
                                                                AAFC.AccelerationSignal(AAFC.k),AAFC.TFSetOption);
             end
         end
@@ -426,34 +444,34 @@ classdef aafc < handle
             if s == 0 % stop updating A and B
                 % update System parameters for VCM
                 for i = 1:AAFC.FilterBankNum_VCM
-                    [AAFC.ThetaM_VCM(:,i),AAFC.FM_VCM{i}] = rls(AAFC.ThetaM_VCM(:,i),AAFC.PhiAccelDelay_VCM(:,i),...
-                                                                AAFC.FM_VCM{i},AAFC.err_vcm(i),AAFC.LambdaM_VCM{i});
+                    [AAFC.ThetaM_VCM(:,i),AAFC.FM_VCM{i}] = AAFC.rls(AAFC.ThetaM_VCM(:,i),AAFC.PhiAccelDelay_VCM(:,i),...
+                                                                     AAFC.FM_VCM{i},AAFC.err_vcm(i),AAFC.LambdaM_VCM{i});
                 end
                 % update System parameters for MA
                 for i = 1:AAFC.FilterBankNum_MA
-                    [AAFC.ThetaM_MA(:,i),AAFC.FM_MA{i}] = rls(AAFC.ThetaM_MA(:,i),AAFC.PhiAccelDelay_MA(:,i),...
-                                                                AAFC.FM_MA{i},AAFC.err_ma(i),AAFC.LambdaM_MA{i});
+                    [AAFC.ThetaM_MA(:,i),AAFC.FM_MA{i}] = AAFC.rls(AAFC.ThetaM_MA(:,i),AAFC.PhiAccelDelay_MA(:,i),...
+                                                                   AAFC.FM_MA{i},AAFC.err_ma(i),AAFC.LambdaM_MA{i});
                 end  
             else 
                 % update System parameters for VCM
                 for i = 1:AAFC.FilterBankNum_VCM
                     theta = [AAFC.ThetaA_VCM(:,i);AAFC.ThetaB_VCM(:,i)];
                     phi = [AAFC.PhiPES_VCM(:,i);AAFC.PhiExcit_VCM(:,i)];
-                    [theta,AAFC.FAB_VCM{i}] = rls(theta,phi,AAFC.FAB_VCM{i},AAFC.err_vcm(i),AAFC.LambdaAB_VCM{i});
+                    [theta,AAFC.FAB_VCM{i}] = AAFC.rls(theta,phi,AAFC.FAB_VCM{i},AAFC.err_vcm(i),AAFC.LambdaAB_VCM{i});
                     AAFC.ThetaA_VCM(:,i) = theta(1:AAFC.OrderA_VCM);
                     AAFC.ThetaB_VCM(:,i) = theta(AAFC.OrderA_VCM+1:end);
-                    [AAFC.ThetaM_VCM(:,i),AAFC.FM_VCM{i}] = rls(AAFC.ThetaM_VCM(:,i),AAFC.PhiAccelDelay_VCM(:,i),...
-                                                                AAFC.FM_VCM{i},AAFC.err_vcm(i),AAFC.LambdaM_VCM{i});
+                    [AAFC.ThetaM_VCM(:,i),AAFC.FM_VCM{i}] = AAFC.rls(AAFC.ThetaM_VCM(:,i),AAFC.PhiAccelDelay_VCM(:,i),...
+                                                                     AAFC.FM_VCM{i},AAFC.err_vcm(i),AAFC.LambdaM_VCM{i});
                 end
                 % update System parameters for MA
                 for i = 1:AAFC.FilterBankNum_MA
                     theta = [AAFC.ThetaA_MA(:,i);AAFC.ThetaB_MA(:,i)];
                     phi = [AAFC.PhiPES_MA(:,i);AAFC.PhiExcit_MA(:,i)];
-                    [theta,AAFC.FAB_MA{i}] = rls(theta,phi,AAFC.FAB_MA{i},AAFC.err_ma(i),AAFC.LambdaAB_MA{i});
+                    [theta,AAFC.FAB_MA{i}] = AAFC.rls(theta,phi,AAFC.FAB_MA{i},AAFC.err_ma(i),AAFC.LambdaAB_MA{i});
                     AAFC.ThetaA_MA(:,i) = theta(1:AAFC.OrderA_MA);
                     AAFC.ThetaB_MA(:,i) = theta(AAFC.OrderA_MA+1:end);
-                    [AAFC.ThetaM_MA(:,i),AAFC.FM_MA{i}] = rls(AAFC.ThetaM_MA(:,i),AAFC.PhiAccelDelay_MA(:,i),...
-                                                              AAFC.FM_MA{i},AAFC.err_ma(i),AAFC.LambdaM_MA{i});
+                    [AAFC.ThetaM_MA(:,i),AAFC.FM_MA{i}] = AAFC.rls(AAFC.ThetaM_MA(:,i),AAFC.PhiAccelDelay_MA(:,i),...
+                                                                   AAFC.FM_MA{i},AAFC.err_ma(i),AAFC.LambdaM_MA{i});
                 end
             end
         end
@@ -493,14 +511,14 @@ classdef aafc < handle
             % apply recursive least square (RLS) adaptive filters
             % update controller parameters for VCM
             for i = 1:AAFC.FilterBankNum_VCM
-                [AAFC.ThetaDF_VCM(:,i),AAFC.FD_VCM{i}] = rls(AAFC.ThetaDF_VCM(:,i),AAFC.PhiAccelBfilter_VCM(:,i),...
-                                                             AAFC.FD_VCM{i},AAFC.pesa_vcm(i),AAFC.LambdaD_VCM{i});
+                [AAFC.ThetaDF_VCM(:,i),AAFC.FD_VCM{i}] = AAFC.rls(AAFC.ThetaDF_VCM(:,i),AAFC.PhiAccelBfilter_VCM(:,i),...
+                                                                  AAFC.FD_VCM{i},AAFC.pesa_vcm(i),AAFC.LambdaD_VCM{i});
             end
             AAFC.ThetaD_VCM = sum(-AAFC.ThetaDF_VCM,2);
             % update controller parameters for MA
             for i = 1:AAFC.FilterBankNum_MA
-                [AAFC.ThetaDF_MA(:,i),AAFC.FD_MA{i}] = rls(AAFC.ThetaDF_MA(:,i),AAFC.PhiAccelBfilter_MA(:,i),...
-                                                           AAFC.FD_MA{i},AAFC.pesa_ma(i),AAFC.LambdaD_MA{i});
+                [AAFC.ThetaDF_MA(:,i),AAFC.FD_MA{i}] = AAFC.rls(AAFC.ThetaDF_MA(:,i),AAFC.PhiAccelBfilter_MA(:,i),...
+                                                                AAFC.FD_MA{i},AAFC.pesa_ma(i),AAFC.LambdaD_MA{i});
             end
             AAFC.ThetaD_MA = sum(-AAFC.ThetaDF_MA,2);
         end
@@ -538,7 +556,107 @@ classdef aafc < handle
             end
             AAFC.TD_MA(:,AAFC.k) = AAFC.ThetaD_MA;
         end
+    end
+    methods % optimal control functions
+        function filterSignal(AAFC,varargin)
+            % 2 FIR filters: low-pass and high-pass
+            if isempty(varargin) == 0
+                LowPassFilter = varargin{1};
+                HighPassFilter = varargin{2};
+            else
+                LowPassFilter = 0;
+                HighPassFilter = 0;
+                for i = 1:AAFC.FilterBankNum_VCM
+                    LowPassFilter = LowPassFilter+AAFC.FilterBankTF_VCM{i};
+                end
+                for i = 1:AAFC.FilterBankNum_MA
+                    HighPassFilter = HighPassFilter+AAFC.FilterBankTF_MA{i};
+                end
+            end
+            AAFC.DSignal_LowFreq = filter(LowPassFilter,1,AAFC.DisturbanceSignal);
+            AAFC.ASignal_LowFreq = filter(LowPassFilter,1,AAFC.AccelerationSignal);
+            AAFC.DSignal_HighFreq = filter(HighPassFilter,1,AAFC.DisturbanceSignal);
+            AAFC.ASignal_HighFreq = filter(HighPassFilter,1,AAFC.AccelerationSignal);
+        end
+        function optimalD_VCM(AAFC,varargin)
+            % find the optimal controller parameters for VCM only
+            if isempty(varargin) == 0
+                n = varargin;
+            else 
+                n = AAFC.SimulationStep;
+            end
+            B = AAFC.ClosedLoopTF_VCM.Numerator{1};
+            A = AAFC.ClosedLoopTF_VCM.Denominator{1};
+            Pd = AAFC.DSignal_LowFreq(1:n)';
+            Pa = [zeros(1,AAFC.OrderD_VCM-1),filter(B,A,AAFC.ASignal_LowFreq(1:n))];
+            Ma = zeros(n,AAFC.OrderD_VCM);
+            for i = 1:n
+                Ma(i,:) = flip(Pa(i:i+AAFC.OrderD_VCM-1));
+            end
+            AAFC.ThetaD_Optimal_VCM = (Ma'*Ma)\(-Ma'*Pd);
+        end
+        function optimalD_MA(AAFC,varargin)
+            % find the optimal controller parameters for MA only
+            if isempty(varargin) == 0
+                n = varargin;
+            else 
+                n = AAFC.SimulationStep;
+            end
+            B = AAFC.ClosedLoopTF_MA.Numerator{1};
+            A = AAFC.ClosedLoopTF_MA.Denominator{1};
+            Pd = AAFC.DSignal_HighFreq(1:n)';
+            Pa = [zeros(1,AAFC.OrderD_MA-1),filter(B,A,AAFC.ASignal_HighFreq(1:n))];
+            Ma = zeros(n,AAFC.OrderD_MA);
+            for i = 1:n
+                Ma(i,:) = flip(Pa(i:i+AAFC.OrderD_MA-1));
+            end
+            AAFC.ThetaD_Optimal_MA = (Ma'*Ma)\(-Ma'*Pd);
+        end
+        function optimalD_Dual(AAFC,varargin)
+            % find the optimal controller parameters by from dual-actuators
+            if isempty(varargin) == 0
+                n = varargin;
+            else 
+                n = AAFC.SimulationStep;
+            end
+            B1 = AAFC.ClosedLoopTF_VCM.Numerator{1};
+            A1 = AAFC.ClosedLoopTF_VCM.Denominator{1};
+            B2 = AAFC.ClosedLoopTF_MA.Numerator{1};
+            A2 = AAFC.ClosedLoopTF_MA.Denominator{1};
+            Pd = AAFC.DisturbanceSignal(1:n)';
+            Pa1 = [zeros(1,AAFC.OrderD_VCM-1),filter(B1,A1,AAFC.AccelerationSignal(1:n))];
+            Pa2 = [zeros(1,AAFC.OrderD_MA-1),filter(B2,A2,AAFC.AccelerationSignal(1:n))];
+            Ma1 = zeros(n,AAFC.OrderD_VCM);
+            Ma2 = zeros(n,AAFC.OrderD_MA);
+            for i = 1:n
+                Ma1(i,:) = flip(Pa1(i:i+AAFC.OrderD_VCM-1));
+                Ma2(i,:) = flip(Pa2(i:i+AAFC.OrderD_MA-1));
+            end
+            M = Ma2' - Ma2'*Ma1*((Ma1'*Ma1)\Ma1');
+            AAFC.ThetaD_Optimal_MA = (M*Ma2)\(-M*Pd);
+            AAFC.ThetaD_Optimal_VCM = (Ma1'*Ma1)\(-Ma1'*Ma2*AAFC.ThetaD_Optimal_MA-Ma1'*Pd);
+        end
+        function optimalControl(AAFC)
+            AAFC.initializeRegressor;
+            AAFC.initializeSimulation;
+            AAFC.ThetaD_VCM = AAFC.ThetaD_Optimal_VCM;
+            AAFC.ThetaD_MA = AAFC.ThetaD_Optimal_MA;
+            AAFC.k = 1; 
+            while AAFC.k <= AAFC.SimulationStep
+                AAFC.generateControlSignal(0,0,1,1); % only compensation
+                AAFC.generateRealPES;
+                AAFC.OptimalControlledPESSignal(AAFC.k) = AAFC.pes;
+                AAFC.UnControlledPESSignal(AAFC.k) = AAFC.uncontrolledpes;            
+                AAFC.k = AAFC.k+1;
+            end
+            disp('Achieved the optimal compensation performance.');
+        end      
+    end
+    methods % adaptive control functions
         function adaptiveControlLMS(AAFC)
+            AAFC.initializeRegressor;
+            AAFC.initializeTFSet;
+            AAFC.initializeSimulation;
             AAFC.k = 1; 
             n = 1;
             AAFC.count = 0;
@@ -563,6 +681,9 @@ classdef aafc < handle
             end
         end
         function adaptiveControlNLMS(AAFC)
+            AAFC.initializeRegressor;
+            AAFC.initializeTFSet;
+            AAFC.initializeSimulation;
             AAFC.k = 1; 
             n = 1;
             AAFC.count = 0;
@@ -587,6 +708,9 @@ classdef aafc < handle
             end
         end
         function adaptiveControlRLS(AAFC)
+            AAFC.initializeRegressor;
+            AAFC.initializeTFSet;
+            AAFC.initializeSimulation;
             AAFC.k = 1; 
             n = 1;
             AAFC.count = 0;
@@ -610,20 +734,31 @@ classdef aafc < handle
                 AAFC.k = AAFC.k+1;
             end
         end
-        % display functions
+    end
+    methods % plot functions
         function plotPES(AAFC)
             figure; plot(AAFC.UnControlledPESSignal); hold on;
                     plot(AAFC.PESSignal);
-            figure; fftp(AAFC.UnControlledPESSignal(end-1e4:end),AAFC.SamplingFreq); hold on;
-                    fftp(AAFC.PESSignal(end-1e4:end),AAFC.SamplingFreq);
+            figure; AAFC.fftp(AAFC.UnControlledPESSignal(end-1e4:end),AAFC.SamplingFreq); hold on;
+                    AAFC.fftp(AAFC.PESSignal(end-1e4:end),AAFC.SamplingFreq);
+            figure; histogram(AAFC.UnControlledPESSignal(end-1e4:end),'Normalization','probability','BinWidth',0.025); hold on;
+                    histogram(AAFC.PESSignal(end-1e4:end),'Normalization','probability','BinWidth',0.025);
+        end
+        function plotMinPES(AAFC)
+            figure; plot(AAFC.UnControlledPESSignal); hold on;
+                    plot(AAFC.OptimalControlledPESSignal);
+            figure; AAFC.fftp(AAFC.UnControlledPESSignal(end-1e4:end),AAFC.SamplingFreq); hold on;
+                    AAFC.fftp(AAFC.OptimalControlledPESSignal(end-1e4:end),AAFC.SamplingFreq);
+            figure; histogram(AAFC.UnControlledPESSignal,'Normalization','probability','BinWidth',0.025); hold on;
+                    histogram(AAFC.OptimalControlledPESSignal,'Normalization','probability','BinWidth',0.025);
         end
         function plotAcc(AAFC)
             figure; plot(AAFC.AccelerationSignal);
-            figure; fftp(AAFC.AccelerationSignal(end-1e4:end),AAFC.SamplingFreq);
+            figure; AAFC.fftp(AAFC.AccelerationSignal(end-1e4:end),AAFC.SamplingFreq);
         end
         function plotDist(AAFC)
             figure; plot(AAFC.DisturbanceSignal);
-            figure; fftp(AAFC.DisturbanceSignal(end-1e4:end),AAFC.SamplingFreq);
+            figure; AAFC.fftp(AAFC.DisturbanceSignal(end-1e4:end),AAFC.SamplingFreq);
         end
         function plotVCM(AAFC,Bode_Opt)
             for i = 1:AAFC.FilterBankNum_VCM
@@ -658,97 +793,117 @@ classdef aafc < handle
             figure; plot(K,AAFC.TD_MA(:,1:AAFC.PlotGap:end),'.b'); grid on;
         end
     end
-    
-end
+    methods(Static)
+        function plant = addstateLTI(plant,sys,x0,type,name)
+            % add states of LTI-system
+            if nargin < 4, type = 'ss'; end
 
-function plant = addstateLTI(plant,sys,x0,type,name)
-% add states of LTI-system
-    if nargin < 4, type = 'ss'; end
+            if ( (nargin <=2) && strcmp(type,'ss') )
+                if isempty(sys.A)%Static gain
+                x0 = 0;
+                else
+                x0 = zeros(size(sys.A,1),1);
+                end
+            end
+    
+            if strcmpi(type, 'ss')
+                if ( (sys.InputDelay + sys.OutputDelay  ~= 0) || ( ~isempty(sys.InternalDelay) && (sys.InternalDelay ~=0) ) )
+                    error('The input system should have zero Input/Output/Internal delay. If the system has delays, they should be modeled by adding delayed states in the state vector.');
+                end
+                if isempty(sys.a), sys.a = 0; end
+                if isempty(sys.b), sys.b = 0; end
+                if isempty(sys.c), sys.c = 0; end
+                if isempty(sys.d), sys.d = 0; end
+                plant.(name) = struct('x',x0,'y',[],'a',sys.a,'b',sys.b,'c',sys.c,'d',sys.d,'Ts',sys.Ts, 'type', type);
+            elseif strcmpi(type, 'iir')
+                [b,a] = tfdata(sys, 'v');
+                denDeg = length(pole(sys));
+                numDeg = length(zero(sys));
+                relDeg = denDeg - numDeg;
+                b = b(relDeg+1:end);
+                a = a(2:end); %remove 1 from a
+                w = [a b];
+                if isempty(x0)
+                    x0 = zeros(length(w),1);
+                end
+                [numInp,~] = size(x0);
+                if numInp == length(w);
+                    Ur = zeros(relDeg,1);
+                else
+                    Ur = zeros(numInp,relDeg);
+                end
+                Ts = sys.Ts;
+                plant.(name) = struct('x', x0, 'y',[],'w',[a b]', 'numDeg', numDeg, 'denDeg', denDeg,'Ts',Ts, 'type',type,'W',[],'Ur',Ur);
+            elseif strcmpi(type, 'fir')
+                if ( ~isvector(sys) )
+                    error( 'Second argument, in2, should be a vector such that in2(i) gives the coefficient for u(k-i)');
+                end
+                sys = reshape(sys,[],1);
+                if isempty(x0)
+                    x0 = zeros(length(sys),1);
+                end
+                plant.(name) = struct('x', x0, 'y',[],'w',sys, 'type',type,'W',[]);
+            end
+        end
+        function [output,plant] = updatestateLTI(plant,sysName,input,opt)
+            % update states of LTI-system
+            sysStruct = plant.(sysName);
+            x = sysStruct.x;
 
-    if ( (nargin <=2) && strcmp(type,'ss') )
-        if isempty(sys.A)%Static gain
-            x0 = 0;
-        else
-            x0 = zeros(size(sys.A,1),1);
-        end
-    end
+            if strcmpi(sysStruct.type, 'ss')
+                xNext = sysStruct.a * x(:,end) + sysStruct.b * input;
+                output = sysStruct.c * x(:,end) + sysStruct.d * input;
+            elseif strcmpi(sysStruct.type, 'iir')
+                denDeg = sysStruct.denDeg;
+                Unew = [sysStruct.Ur(end); x(denDeg+1:end-1, end)]; % [u(k) u(k-1) ... u(k-denDeg)]
+                sysStruct.Ur = [input;sysStruct.Ur(1:end-1)];
+                Y = x(1:denDeg,end); % [-y(k-1) -y(k-2) ... -y(k-denDeg)]
+                output = [Y; Unew]' * sysStruct.w;
+                Ynew = [-output; Y(1:denDeg-1)];
+                xNext = [Ynew ; Unew];
+            elseif strcmpi(sysStruct.type, 'fir')
+                % by default FIR = w0 + w1*z^-1 + ...., w0 !=0
+                xNext = [input; x(1:end-1, end) ];
+                output = xNext(:,end)' * sysStruct.w;
+            end
     
-    if strcmpi(type, 'ss')
-        if ( (sys.InputDelay + sys.OutputDelay  ~= 0) || ( ~isempty(sys.InternalDelay) && (sys.InternalDelay ~=0) ) )
-            error('The input system should have zero Input/Output/Internal delay. If the system has delays, they should be modeled by adding delayed states in the state vector.');
-        end
-        if isempty(sys.a), sys.a = 0; end
-        if isempty(sys.b), sys.b = 0; end
-        if isempty(sys.c), sys.c = 0; end
-        if isempty(sys.d), sys.d = 0; end
-        plant.(name) = struct('x',x0,'y',[],'a',sys.a,'b',sys.b,'c',sys.c,'d',sys.d,'Ts',sys.Ts, 'type', type);
-    elseif strcmpi(type, 'iir')
-        [b,a] = tfdata(sys, 'v');
-        denDeg = length(pole(sys));
-        numDeg = length(zero(sys));
-        relDeg = denDeg - numDeg;
-        b = b(relDeg+1:end);
-        a = a(2:end); %remove 1 from a
-        w = [a b];
-        if isempty(x0)
-            x0 = zeros(length(w),1);
-        end
-        [numInp,~] = size(x0);
-        if numInp == length(w);
-            Ur = zeros(relDeg,1);
-        else
-            Ur = zeros(numInp,relDeg);
-        end
-        Ts = sys.Ts;
-        plant.(name) = struct('x', x0, 'y',[],'w',[a b]', 'numDeg', numDeg, 'denDeg', denDeg,'Ts',Ts, 'type',type,'W',[],'Ur',Ur);
-    elseif strcmpi(type, 'fir')
-        if ( ~isvector(sys) )
-            error( 'Second argument, in2, should be a vector such that in2(i) gives the coefficient for u(k-i)');
-        end
-        sys = reshape(sys,[],1);
-        if isempty(x0)
-            x0 = zeros(length(sys),1);
-        end
-        plant.(name) = struct('x', x0, 'y',[],'w',sys, 'type',type,'W',[]);
-    end
-end
-function [output,plant] = updatestateLTI(plant,sysName,input,opt)
-% update states of LTI-system
-    sysStruct = plant.(sysName);
-    x = sysStruct.x;
-
-    if strcmpi(sysStruct.type, 'ss')
-        xNext = sysStruct.a * x(:,end) + sysStruct.b * input;
-        output = sysStruct.c * x(:,end) + sysStruct.d * input;
-    elseif strcmpi(sysStruct.type, 'iir')
-        denDeg = sysStruct.denDeg;
-        Unew = [sysStruct.Ur(end); x(denDeg+1:end-1, end)]; % [u(k) u(k-1) ... u(k-denDeg)]
-        sysStruct.Ur = [input;sysStruct.Ur(1:end-1)];
-        Y = x(1:denDeg,end); % [-y(k-1) -y(k-2) ... -y(k-denDeg)]
-        output = [Y; Unew]' * sysStruct.w;
-        Ynew = [-output; Y(1:denDeg-1)];
-        xNext = [Ynew ; Unew];
-    elseif strcmpi(sysStruct.type, 'fir')
-        % by default FIR = w0 + w1*z^-1 + ...., w0 !=0
-        xNext = [input; x(1:end-1, end) ];
-        output = xNext(:,end)' * sysStruct.w;
-    end
+            if opt.storeState ~= 0
+                sysStruct.x = [x xNext];
+            else
+                sysStruct.x = xNext;
+            end
     
-    if opt.storeState ~= 0
-        sysStruct.x = [x xNext];
-    else
-        sysStruct.x = xNext;
+            if opt.storeOutput ~= 0
+                sysStruct.y = [sysStruct.y output];
+            else
+                sysStruct.y = output;
+            end
+            plant.(sysName) = sysStruct;
+        end
+        function [theta,F] = rls(theta,phi,F,err,lambda)
+            % recursive least square filter
+            g = F*phi/(lambda+phi'*F*phi);
+            theta = theta+err*g;
+            F = 1/lambda*(F-g*phi'*F);
+        end
+        function fftp(y,Fs,NFFT)
+            % fft and plot the spectrum of signal 
+            if nargin < 2
+                Fs = 2*pi;
+            end
+            L = numel(y);
+            if nargin < 3
+                NFFT = 2^nextpow2(L); % Next power of 2 from length of y
+            end
+            X = fft(y,NFFT)/L;
+            f = Fs/2*linspace(0,1,NFFT/2+1);
+            % Plot single-sided amplitude spectrum.
+            magabs = 2*abs(X(1:NFFT/2+1));
+            magdb = 20*log10(magabs);
+            plot(f,magabs); 
+            title('Single-Sided Amplitude Spectrum of y(t)')
+            xlabel('Frequency (Hz)')
+            ylabel('|Y(f)|')
+        end
     end
-    
-    if opt.storeOutput ~= 0
-        sysStruct.y = [sysStruct.y output];
-    else
-        sysStruct.y = output;
-    end
-    plant.(sysName) = sysStruct;
-end
-function [theta,F] = rls(theta,phi,F,err,lambda)
-    g = F*phi/(lambda+phi'*F*phi);
-    theta = theta+err*g;
-    F = 1/lambda*(F-g*phi'*F);
 end
